@@ -1785,7 +1785,7 @@ We proceed as follows:
 
 When using CPUs only, much of the time is spent in the Fourier filtering.
 With a GPU, this becomes much faster. Copyin is avoided at all times. Copyout
-is avoided when ``fast_locpot_int_fast_ngwfs T`` is in use.
+is avoided when ``fast_ngwfs T`` is in use.
 
 Performance
 -----------
@@ -1812,8 +1812,8 @@ Fast NGWFs (for developers)
 This section describes the "fast ngwfs" approach introduced in ONETEP 7.3.26
 in December 2024. This is developer-oriented material -- for a user manual,
 see :ref:`user_fast_ngwfs`.
-This documentation pertains to ONETEP 7.3.50 and later. If you are using a version of
-ONETEP older than 7.3.50, please update -- not everything you read here will be
+This documentation pertains to ONETEP 8.2.0 and later. If you are using a version of
+ONETEP older than 8.2.0, please update -- not everything you read here will be
 applicable otherwise.
 
 
@@ -1842,11 +1842,9 @@ is actually a periodic image and needs to be unwrapped back from the box to the
 image. Such PPDs are sometimes termed *improper*. The limited contiguity (a PPD
 is typically only 5-7 points long) and no GPU support are further drawbacks.
 
-With ``fast_density_fast_ngwfs T`` we switch to a *rod* representation for NGWFs
-in the calculation of fast density.
-
-With ``fast_locpot_int_fast_ngwfs T`` we switch to a *rod* representation for NGWFs
-in the calculation of fast local potential integrals.
+With ``fast_ngwfs T`` we switch to a *rod* representation for NGWFs
+in the calculation of fast density, fast local potential integrals, fast NGWF
+gradient and fast kinetic.
 
 A *rod* is
 oriented along the *a1* direction and spans an integer number of PPDs.
@@ -1866,11 +1864,12 @@ and handling of periodicity are described.
 State of the art
 ----------------
 
-Currently (February 2025, v7.3.50), fast NGWFs can be used in fast local potential
-integrals (``fast_locpot_int T``), and in the fast
-density calculation (``fast_density T``).
+Currently (August 2026, v8.2.0), fast NGWFs can be used in fast local potential
+integrals (``fast_locpot_int T``), fast density calculation (``fast_density T``),
+fast NGWF gradient (``fast_ngwf_gradient T``) and fast kinetic (used when
+fast NGWF gradient is on).
 
-The rest of ONETEP certainly does not benefit from fast NGWFs, yet.
+The rest of ONETEP, which is a rapidly shrinking set, does not benefit from fast NGWFs, yet.
 
 Performance
 -----------
@@ -1887,6 +1886,66 @@ In practice you will likely see very limited gains from fast NGWFs on a CPU,
 it's mostly meant to speed up GPU calculations.
 
 ------
+
+Sparse Linear Algebra
+=====================
+
+Sparse matrices in ONETEP arise from quantities expressed in terms of
+atom-dependent basis functions (NGWFs, projectors, etc.). The resulting matrices
+are split among the MPI ranks as evenly as possible, so that each MPI rank holds
+approximately the same number of columns of the matrix. This splitting does not
+divide basis functions belonging to the same atom between different MPI ranks.
+One can then think of each MPI rank as holding a set of matrix blocks labelled by
+row-atom and column-atom indices, with block dimensions set by the number of
+basis functions assigned to each row- and column-atom, respectively. There
+are three types of blocks depending on their filling: dense (all entries filled),
+sparse (only some entries filled) and blank (all entries are zero). An entry is zero
+if the respective basis functions do not spatially overlap. A block is considered
+dense or sparse depending on how many of its entries are non-zero as a fraction of the
+total number of entries, and this is controlled by ``dense_threshold`` using its
+internal defaults or via the input file. Setting ``dense_threshold`` to a very low
+value, e.g. 1.e-6, typically results in all blocks being classified as either
+dense or blank, and setting it to 0.0 marks all blocks as dense (useful only
+for testing). In operations involving blocks the type of block is taken into account
+to perform the calculation as quickly as possible (for instance, a blank block will
+make no contribution and so it can be skipped when accumulating the result).
+
+When performing an operation such as a matrix multiplication, each MPI rank will
+have on its own memory some of the required blocks but will also need to request
+blocks stored by other MPI ranks. In the original CPU-only implementation the
+wait time associated with the required MPI comms was partially masked by
+overlapping the comms with the computations using the already available blocks
+on each rank. Modern hardware nodes have many cores which can share memory, which
+can be directly exploited with OpenMP parallelism. When dividing those memory-sharing
+cores into MPI ranks the associated MPI comms can be skipped and the memory shared
+directly also between ranks using MPI shared memory. By default ONETEP does not do
+this (``sparse_shared_comms = .false.``) but this can be overridden through the
+input file. One can set ``sparse_shared_comms = .true.``, which also toggles
+``sparse_shared_data = .true.``, and so enables skipping those MPI comms which can
+instead replaced by MPI shared memory access. There is also a separate option,
+``sparse_preshared_comms = .true.``, which has the same effect as ``sparse_shared_comms``
+but in addition does not overlap comms and computation, with all the data that
+an MPI rank needs being fetched before starting on the respective block computations.
+This has the side effect of needing larger buffers to hold data from other MPI ranks
+and so might play a role in out-of-memory crashes if the buffers become too large.
+
+An additional layer of complexity is added with GPU-offloading of sparse matrix
+operations, which can be done in two ways. With ``-DGPU_DGEMM`` individual products
+of dense blocks are offloaded to the GPU and the resulting block retrieved.
+Alternatively, with ``-DGPU_SPARSE`` some book-keeping is performed to avoid
+transferring each block to and from the GPU more times than necessary. In this case
+one also has to mind what GPU memory is used for sparse operations, as the same
+buffers that are present on each MPI rank will also be created on the GPU.
+Contrary to the CPU memory, different MPI ranks assigned to a given GPU cannot share
+its memory. The subroutine ``sparse_product`` ameliorates this by assigning only
+one MPI rank per comms group (the group of MPI ranks that can share CPU memory)
+to interact with the GPU with the help of the book-keeping enabled with
+``-DGPU_SPARSE``. For this to work smoothly the size of the MPI comms groups
+is internally computed so that it fits with the number of GPUs on a node 
+(that is, ``comms_group_size`` is a divisor of the number of MPI ranks on a node
+and multiple of the number of GPUs on a node).  This can be overridden via
+the input file by specifying ``comms_group_size``.
+
 
 .. _dev_history:
 

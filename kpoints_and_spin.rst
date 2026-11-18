@@ -9,8 +9,50 @@ Setting up k-points and spin in ONETEP
 Spin-polarisation in ONETEP
 ===========================
 
-TBC
+ONETEP supports two approaches to spin-polarisation. Until recent work, ONETEP’s
+NGWF formalism used a shared set of NGWFs used to represent both spin channels,
+combined with a spin-dependent density kernel, and hence spin-dependent eigenstates
+and state-filling. This restriction constrained the NGWFs to a compromise of orbital
+shape and limited their ability to represent spatial differences between spin-up and
+spin-down eigenstates. This is referred to in this document as using a spin-dependent
+kernel only.
 
+The development of a spin-dependent NGWF framework enables unrestricted variational
+freedom by allowing each spin channel to be described by its own independently optimized
+set of NGWFs. This was shown in [EscobarAzor2026] to provide a more faithful treatment
+of exchange splitting, spin localization, and spin-resolved energetics, particularly
+in systems with open-shell configurations and localized magnetic moments. This approach
+will be referred to as using spin-dependent NGWFs.
+
+Spin polarisation is automatically enabled if the initial electron counting determines there
+to be a net spin on the system. This is either set explicitly by the user by the via a
+nonzero value for the keyword ``spin``, or implicitly determined by the atomic species present
+in the simulation cell and the net charge (keyword ``charge``). If the electron count
+is found to be either non-integer or an odd number, spin polarisation is enabled. Finally,
+the user can control explicitly explicitly whether the system is treated as spin-polarised
+via the boolean keyword ``spin_polarised``.
+
+The spin-dependent NGWFs approach is not enabled by default and must be chosen
+explicitly, by setting the boolean keyword ``ngwfs_spin_polarised`` to ``true``.
+
+If only the kernel is spin-dependent (``spin_polarised: true`` and ``ngwfs_spin_polarised: false``)
+then the density kernel is expressed as:
+
+.. math::
+   :label: rhodef_spin_indep
+
+   \rho^{\sigma}(\mathbf{r},\mathbf{r}') = \phi_{\alpha}(\mathbf{r}) K_{\sigma}^{\alpha\beta} \phi^{*}_{\beta}(\mathbf{r}').
+
+If the NGWFs are also spin-dependent (``spin_polarised: true`` and ``ngwfs_spin_polarised: true``)
+
+.. math::
+   :label: rhodef_spin_dep
+
+   \rho^\sigma(\mathbf{r},\mathbf{r}') = \phi^{\sigma}_{\alpha}(\mathbf{r}) K_{\sigma}^{\alpha\beta} \phi^{\sigma*}_{\beta}(\mathbf{r}').
+
+Both the above schemes are compatible with most functionality in ONETEP (eg Hubbard, EMFT, PAW)
+but currently spin-dependent NGWFs are not compatible with Exact Exchange. For further
+discussion of the impact of spin-dependent NGWFs, see [EscobarAzor2026].
 
 k-points and Brillouin zone sampling in ONETEP
 ==============================================
@@ -222,7 +264,7 @@ Tight-binding (TB) mode
 =======================
 
 The tight-binding (TB) mode is designed to use fully localised NGWFs ( 
-``extended_ngwf : F F F``) and the k-point sampling is performed by augmenting
+``extend_ngwf : F F F``) and the k-point sampling is performed by augmenting
 the Hamiltonian, overlap and other matrices with k-dependent phase factors.
 
 Specifically, in the TB mode, we adopt the Bloch sum form of the Bloch function:
@@ -406,11 +448,11 @@ Hybrid and extended NGWFs
 =========================
 
 In the PW mode, NGWFs needs to be extended. This is turned on by using the 
-keyword ``extended_ngwf`` in the input file. e.g.,
+keyword ``extend_ngwf`` in the input file. e.g.,
 
 ::
 
-   extended_ngwf : T T T
+   extend_ngwf : T T T
 
 It is also possible to only allow NGWFs to be extended along certain directions,
 hence utlising the periodicity of the system **only** along those directions via
@@ -423,7 +465,7 @@ calculation with only one k-point (i.e., the :math:`\Gamma` point).
 Fixed kernel calculation
 ========================
 
-When using fully extended NGWFs (``extended_ngwf : T T T``) it is possible to 
+When using fully extended NGWFs (``extend_ngwf : T T T``) it is possible to 
 perform fixed kernel calculation where the number of NGWFs used is the same as 
 the number of **occupied** states. Since we are not optimising the density 
 kernel, this will only work with known insulators (i.e., all NGWFs are fully 
@@ -445,19 +487,55 @@ number of occupied states.
 Additional notes
 ================
 
-Currently, full Brillouin zone sampling is only tested for norm-conserving
-pseudopotentials. Here's a brief list of supported functionalities:
+Brillouin zone sampling has been tested with norm-conserving
+pseudopotentials and with PAW. The k-points can be reduced by the point
+group of the crystal with ``use_symmetry`` (see :doc:`symmetry`), and divided
+between k-point parallelisation groups with ``num_kpars``.
+
+The following are supported with more than one k-point:
 
 - Ground state energy calculation with LNV (``exact_lnv : T``) and EDFT
-  (``edft : T``). 
-- Geometry optimisation (but no cell-optimisation).
-- Parts of the properties module (e.g., charge density outputs, eigenvalue
-  outputs).
+  (``edft : T``, with any of the smearing schemes), with or without spin
+  polarisation.
+- DFT+U, with the occupancy matrices symmetrised when ``use_symmetry`` is
+  used.
+- Forces and geometry optimisation (but no cell optimisation).
+- Conduction NGWF optimisation (``task : COND``), in PW mode only.
+- Bandstructures along a path in PW mode, with NGWFs optimised at each
+  k-point of the path (tasks ``BANDSTRUCTURE`` and
+  ``PROPERTIES_BANDSTRUCTURE``, see :doc:`bandstructure_pw`).
+- In the properties module:
+
+  - charge density, spin density and potential outputs, and the electric
+    field;
+  - eigenvalue outputs, and the density of states and local density of
+    states, with the Fermi level found from the eigenvalues of all
+    k-points;
+  - Mulliken and Löwdin atomic populations, and DDEC charges;
+  - optical spectra (joint density of states and imaginary part of the
+    dielectric function) from conduction calculations, and optical matrix
+    elements for OptaDOS, including the PAW terms;
+  - EELS matrix elements for OptaDOS; with ``use_symmetry``, these are
+    unfolded onto the full k-point mesh, as OptaDOS requires.
+
+The following are not yet available with more than one k-point, and either
+stop with an error or are skipped:
+
+- kernel DIIS, Mermin and penalty-functional density kernel optimisation;
+- calculations with more than one subsystem (``species_ngwf_regions``);
+- meta-GGA functionals and other quantities that need the kinetic energy
+  density (including electron localisation descriptors);
+- LR-TDDFT, RT-TDDFT, linear-response phonons and DMFT;
+- in the properties module: Mulliken bond populations, NGWF analysis and
+  spreads, polarisation, the Hubbard-projected local density of states, the
+  bandstructure in the ground-state NGWF basis (``bs_method``) and its
+  unfolding, NBO and NPA, distributed multipole analysis, and electronic
+  transport.
 
 Keywords
 ========
 
--  ``extended_ngwf`` [Basic, bool bool bool, default ``F F F``\ ] Turn on 
+-  ``extend_ngwf`` [Basic, bool bool bool, default ``F F F``\ ] Turn on 
    extended NGWFs along the three directions.
 
 -  ``kpoint_method`` [Basic, string, default ``None``\ ] The method used to generate 
@@ -482,3 +560,8 @@ Keywords
 
 - ``num_kpars`` [Basic int, default ``1``\ ] The number of k-parallelisation
   groups.
+
+References
+==========
+
+[EscobarAzor2026] M. Escobar Azor, D. D. O’Regan, A. Safavi, J. Dziedzic, C.-K. Skylaris, N. D. M. Hine, J. Chem. Phys. 164, 174119 (2026)

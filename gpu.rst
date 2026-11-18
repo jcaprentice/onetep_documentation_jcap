@@ -3,6 +3,8 @@ ONETEP using GPUs
 =================
 
 :Author: Jacek Dziedzic, University of Southampton
+:Author: Gianluca Seaford, University of Warwick
+:Author: Manuel dos Santos Dias, STFC
 
 Introduction
 ============
@@ -16,7 +18,8 @@ At this moment, the following key algorithms have been GPU ported:
  - fast local potential integrals (see :ref:`user_fast_locpot_int`),
  - fast NGWF gradient (see :ref:`user_fast_ngwf_gradient`),
  - Hartree-Fock exchange (not completely),
- - sparse matrix products (work is very much in progress).
+ - sparse matrix products (now available, further optimisation needed).
+ - dense linear algebra (via ELSI interface, optimisation is in progress).
 
 Note that the usual ("slow") calculation of density, local potential integrals,
 and NGWF gradient are not GPU-capable. You will not get any improvement from
@@ -25,7 +28,9 @@ potential integrals, and fast NGWF gradient, except if you use
 use Hartree-Fock exchange, as this does not require any extra keywords.
 The improvement in sparse matrix products is currently modest and only if you
 have many (hundreds) of atoms per MPI rank. This does not require any extra
-keywords, either.
+keywords, either, but some are available for fine-tuning. Similarly, the
+improvement to the dense linear algebra routines via the ELSI interface is system
+dependent, and typically requires large numbers of atoms per GPU.
 
 Implementation
 ==============
@@ -84,6 +89,16 @@ but with 4 A100 cards on a 128-core node you wouldn't. Differences will not be
 substantial, so do not worry.
 
  - ``-DGPU_DGEMM`` to use GPUs for sparse matrix products.
+
+For calculations involving dense linear algebra, theere may be an advantage to using
+the ELPA routines via the ELSI interface. Please note that these routines require 
+both ELPA and ELSI to be compiled with an appropriate compiler, ELSI to be linked to 
+ELPA at compile time (guidance can be found in the ELSI documentation), and ONETEP
+needs to be linked to both libraries and passed the ``-DELSI`` flag at compile time. 
+An example of configuring ONETEP with ELSI and ELPA can be found in 
+``config/conf.isambardai_elsi.nvfortran.acc``.
+
+ - ``-DGPU_ELPA`` to use ELPA GPU routines via the ELSI interface.
 
 All the options are described in detail later in this document.
 
@@ -168,15 +183,17 @@ The following compile-time options are recognized by the GPU port.
 |                          |                                                           |
 |                          | multiplications to GPUs. Anytime dense blocks that are    |
 |                          |                                                           |
-|                          | larger than 256x256 are multiplied, the multiplication is |
+|                          | larger than 256x256 are multiplied, (this default size can|
 |                          |                                                           |
-|                          | offloaded to the GPU(s). This is only modestly faster than|
+|                          | be controlled through ``gpu_min_block_size``) the         |
 |                          |                                                           |
-|                          | CPU BLAS because of copyin and copyout. The associated    |
+|                          | multiplication is offloaded to the GPU(s). This is only   |
 |                          |                                                           |
-|                          | reduction in ``dense_threshold`` helps move more matmuls  |
+|                          | modestly faster than CPU BLAS because of copyin and       |
 |                          |                                                           |
-|                          | to the GPU.                                               |
+|                          | copyout. The associated reduction in ``dense_threshold``  | 
+|                          |                                                           |
+|                          | helps move more matmuls to the GPU.                       |
 |                          |                                                           |
 |                          | If your nodes have a lot of CPU power compared to GPU     |
 |                          |                                                           |
@@ -200,7 +217,49 @@ The following compile-time options are recognized by the GPU port.
 |                          |                                                           |
 |                          | machine. If you find good speed-ups, you may consider     |
 |                          |                                                           |
-|                          | reducing ``dense_threshold`` further, even to 0.0.        |
+|                          | reducing ``dense_threshold`` further, e.g. to 1.e-6 (do   |
+|                          |                                                           |
+|                          | not set it to 0.0 or the code will also multiply blocks   |
+|                          |                                                           |
+|                          | which consist only of zeros and this is unnecessary).     |
++--------------------------+-----------------------------------------------------------+
+| ``-DGPU_SPARSE``         | This enables the same type of functionality as            |
+|                          |                                                           |
+|                          | ``-DGPU_DGEMM`` but with additional book-keeping to avoid |
+|                          |                                                           |
+|                          | transfering matrix blocks to and from the GPU more than   |
+|                          |                                                           |
+|                          | is actually necessary. To help keeping track of things    |
+|                          |                                                           |
+|                          | only two types of matrix blocks are accepted: dense (all  |
+|                          |                                                           |
+|                          | entries filled) or blank (all entries zero and so the     |
+|                          |                                                           |
+|                          | block can be skipped). To automate this ``-DGPU_SPARSE``  |
+|                          |                                                           |
+|                          | sets ``dense_threshold`` to 1.e-6 by default. Do not set  |
+|                          |                                                           |
+|                          | it to 0.0 for the reason explained in ``-DGPU_DGEMM``.    |
+|                          |                                                           |
+|                          | The speed-ups achieved with either ``-DGPU_DGEMM`` or     |
+|                          |                                                           |
+|                          | ``-DGPU_SPARSE`` are usually similar but also hardware    |
+|                          |                                                           |
+|                          | dependent, so some testing is required to achieve         |
+|                          |                                                           |
+|                          | optimal performance.                                      |
++--------------------------+-----------------------------------------------------------+
+| ``-DGPU_ELPA``           | Moves dense linear algebra operations to the GPU in the   |
+|                          |                                                           |
+|                          | ``dense_eigensolve`` routine. Please note, this option    |
+|                          |                                                           |
+|                          | requires ONETEP to be compiled using the ``-DELSI`` flag  |
+|                          |                                                           |
+|                          | and linked to suitable ELSI and ELPA libraries.           |
+|                          |                                                           |
+|                          | These routines are still a work in progress, and thus may |
+|                          |                                                           |
+|                          | not yield any speed-up for small systems.                 |
 +--------------------------+-----------------------------------------------------------+
 | ``-DGPU_A100``           | Forces the GPU port of Hartree-Fock exchange to use an    |
 |                          |                                                           |
@@ -217,7 +276,7 @@ The following compile-time options are recognized by the GPU port.
 |                          | Ignored outside of Hartree-Fock exchange.                 |
 +--------------------------+-----------------------------------------------------------+
 
-There is also one runtime option (specified in the input file) that controls
+There are two runtime options (specified in the input file) that control
 the GPU port:
 
  - ``threads_gpu`` -- can be used to adjust the number of OpenMP threads in loops
@@ -229,6 +288,11 @@ the GPU port:
    This will vastly reduce the requirement on GPU memory while the reduction in
    performance should not be dramatic -- FFTs are expensive, and even with fewer
    threads it is often possible to saturate the GPU.
+
+ - ``gpu_min_block_size`` -- can be used to control the matrix block dimensions
+   (default is 256) above which the corresponding block matrix multiplications is 
+   offloaded to the GPU. This is operative if ONETEP is compiled with ``-DGPU_DGEMM``
+   or ``-DGPU_SPARSE``.
 
 
 Hartree-Fock exchange
@@ -248,6 +312,25 @@ For best speed-up set:
   to be as large as possible without exceeding your RAM allowance.
 
 All the usual guidelines in :ref:`hfx_advanced` still apply.
+
+
+Dense Linear Algebra
+====================
+
+ONETEP utilises the ELSI interface to perform dense linear algebra operations on GPUs.
+Currently, only ELPA routines are supported on GPUs. This is expected to be expanded 
+to incorporate additional solvers in the future. This option is enabled using the 
+``-DGPU_ELSI`` and ``-DGPU_ELPA`` compile-time flags. This approach does require the
+ELPA and ELSI libraries to be correctly cross compiled using an appropriate compiler
+and linked to ONETEP. Although not a difficult task, it is recommended to build ELPA 
+and ELSI with the relevant Fortran test suites to catch any issues early. Instructions
+for building and linking the ELPA and ELSI libraries can be found in the respective
+documentation. An example of modifying a configuration file to support ELPA calculations 
+the ELSI interface on GH200 nodes can be found in ``config/conf.isambardai_elsi.nvfortran.acc``.
+
+In addition, a debugging option is also available for ELPA GPU runs via the ``-DGPU_ELPA_DEBUG`` 
+compile-time flag. This enables additional sanity checks and can help diagnose any issues.
+This option may reduce performace, so should only be used for troubleshooting.
 
 State of the art
 ================
